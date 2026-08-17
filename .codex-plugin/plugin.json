@@ -1,0 +1,25 @@
+{
+  "name": "paper-lens",
+  "version": "0.1.0",
+  "description": "Quickly read a paper, then deepen the same report into a source-grounded reviewer-level analysis.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Paper Lens",
+    "shortDescription": "Quick and reviewer-level paper reading in one report.",
+    "longDescription": "Read an arXiv paper or local PDF quickly, continue into a reviewer-level deep analysis, and keep both stages in one source-grounded Markdown report.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $paper-lens to quickly read this arXiv paper.",
+      "Use $paper-lens to deeply review this local PDF.",
+      "Continue the current Paper Lens report in deep mode."
+    ]
+  }
+}
