@@ -1,5 +1,5 @@
 # Paper Lens
-,3cyOdFGvvpD27Ph%e
+
 Paper Lens 是一个面向 Codex 的单篇论文阅读插件。它先生成一份适合快速浏览的报告，并可在同一个 `report.md` 中继续扩展为 reviewer-level 深读，避免快读与深读形成两份相互漂移的文档。
 
 支持以下输入：
@@ -174,4 +174,4 @@ python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/image?repos=YSQ-boop/paper-lens&type=Date)](https://www.star-history.com/?repos=YSQ-boop%2Fpaper-lens&type=date)
+[![Star History Chart](https://api.star-history.com/chart?repos=YSQ-boop/paper-lens&type=date&legend=top-left&sealed_token=SxwwL4rJaM6u_fF4TS9Eomxbf-yR_35irxkbY6wI_wD7w6oBXQ0aDMt06YcH5hSalF-BK6iO)](https://www.star-history.com/?repos=YSQ-boop%2Fpaper-lens&type=date)
