@@ -172,6 +172,3 @@ python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
     └── test_pipeline.py
 ```
 
-## Star History
-
-[![Star History Chart](https://api.star-history.com/chart?repos=YSQ-boop/paper-lens&type=date&legend=top-left&sealed_token=SxwwL4rJaM6u_fF4TS9Eomxbf-yR_35irxkbY6wI_wD7w6oBXQ0aDMt06YcH5hSalF-BK6iO)](https://www.star-history.com/?repos=YSQ-boop%2Fpaper-lens&type=date)
