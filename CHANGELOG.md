@@ -4,6 +4,8 @@ Notable changes are documented here. The project follows Semantic Versioning.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-24
+
 ### Added
 
 - Optional end-to-end Codex evaluation harness and local negative fixtures.
@@ -22,5 +24,6 @@ Notable changes are documented here. The project follows Semantic Versioning.
 
 - Initial Paper Lens skill, deterministic preparation pipeline, quick/deep report contract, and unit tests.
 
-[Unreleased]: https://github.com/YSQ-boop/paper-lens/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/YSQ-boop/paper-lens/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/YSQ-boop/paper-lens/compare/75e4dd4...v0.2.0
 [0.1.0]: https://github.com/YSQ-boop/paper-lens/tree/75e4dd4
