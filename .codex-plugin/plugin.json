@@ -1,17 +1,24 @@
 {
   "name": "paper-lens",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Quickly read a paper, then deepen the same report into a source-grounded reviewer-level analysis.",
   "author": {
-    "name": "Local developer"
+    "name": "YSQ-boop",
+    "url": "https://github.com/YSQ-boop"
   },
+  "homepage": "https://github.com/YSQ-boop/paper-lens#readme",
+  "repository": "https://github.com/YSQ-boop/paper-lens",
+  "license": "Apache-2.0",
+  "keywords": ["codex", "research", "papers", "arxiv", "review"],
   "skills": "./skills/",
   "interface": {
     "displayName": "Paper Lens",
     "shortDescription": "Quick and reviewer-level paper reading in one report.",
     "longDescription": "Read an arXiv paper or local PDF quickly, continue into a reviewer-level deep analysis, and keep both stages in one source-grounded Markdown report.",
-    "developerName": "Local developer",
+    "developerName": "YSQ-boop",
     "category": "Productivity",
+    "websiteURL": "https://github.com/YSQ-boop/paper-lens",
+    "privacyPolicyURL": "https://github.com/YSQ-boop/paper-lens/blob/main/PRIVACY.md",
     "capabilities": [
       "Read",
       "Write"

@@ -6,6 +6,7 @@ import json
 import tarfile
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -55,7 +56,7 @@ def make_encrypted_pdf(path: Path) -> None:
 def make_source_tar() -> bytes:
     payload = io.BytesIO()
     tex = rb"\section{Method}\begin{figure}\includegraphics{figure.png}\caption{Method overview}\label{fig:method}\end{figure}"
-    # A valid 1x1 PNG; source figures are preserved without PDF raster-size filtering.
+    # A valid 1x1 PNG; source figures are decoded and normalized before report use.
     png = (
         b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
         b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
@@ -144,6 +145,82 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(metadata["paper_id"], "2401.12345v3")
         self.assertEqual(metadata["title"], "Versioned Paper")
 
+    def test_cli_and_manifest_versions_match(self) -> None:
+        manifest_path = SCRIPT.parents[3] / ".codex-plugin" / "plugin.json"
+        manifest_version = json.loads(manifest_path.read_text(encoding="utf-8"))["version"]
+        self.assertEqual(manifest_version.split("+", 1)[0], pipeline.PLUGIN_VERSION)
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout):
+            pipeline.build_parser().parse_args(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn(pipeline.PLUGIN_VERSION, stdout.getvalue())
+
+
+class NetworkLimitTests(unittest.TestCase):
+    class FakeResponse:
+        def __init__(self, chunks: list[bytes], content_length: str | None = None) -> None:
+            self.chunks = chunks
+            self.headers = {"Content-Length": content_length} if content_length else {}
+            self.encoding = "utf-8"
+            self.closed = False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_content(self, chunk_size: int):
+            self.chunk_size = chunk_size
+            yield from self.chunks
+
+        def close(self) -> None:
+            self.closed = True
+
+    def test_http_get_streams_and_closes(self) -> None:
+        response = self.FakeResponse([b"hello ", b"world"], "11")
+        with mock.patch.object(pipeline.requests, "get", return_value=response) as get:
+            self.assertEqual(pipeline.http_get("https://example.test", max_bytes=11), "hello world")
+        get.assert_called_once_with(
+            "https://example.test",
+            timeout=pipeline.HTTP_TIMEOUT,
+            headers={"User-Agent": pipeline.USER_AGENT},
+            stream=True,
+        )
+        self.assertTrue(response.closed)
+
+    def test_http_get_rejects_announced_and_streamed_overflow(self) -> None:
+        announced = self.FakeResponse([], "12")
+        with mock.patch.object(pipeline.requests, "get", return_value=announced):
+            with self.assertRaisesRegex(pipeline.PipelineError, "declares 12 bytes"):
+                pipeline.http_get("https://example.test/large", max_bytes=11)
+        self.assertTrue(announced.closed)
+
+        streamed = self.FakeResponse([b"123456", b"789012"])
+        with mock.patch.object(pipeline.requests, "get", return_value=streamed):
+            with self.assertRaisesRegex(pipeline.PipelineError, "exceeded"):
+                pipeline.http_get("https://example.test/chunked", binary=True, max_bytes=11)
+        self.assertTrue(streamed.closed)
+
+    def test_safe_download_streams_atomically_and_cleans_overflow(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "paper.pdf"
+            response = self.FakeResponse([b"abc", b"def"], "6")
+            with mock.patch.object(pipeline.requests, "get", return_value=response):
+                pipeline.safe_download("https://example.test/paper.pdf", destination, max_bytes=6)
+            self.assertEqual(destination.read_bytes(), b"abcdef")
+            self.assertTrue(response.closed)
+            self.assertEqual(list(root.iterdir()), [destination])
+
+            overflow_destination = root / "overflow.pdf"
+            overflow = self.FakeResponse([b"1234", b"5678"])
+            with mock.patch.object(pipeline.requests, "get", return_value=overflow):
+                with self.assertRaisesRegex(pipeline.PipelineError, "exceeded"):
+                    pipeline.safe_download(
+                        "https://example.test/overflow.pdf", overflow_destination, max_bytes=7
+                    )
+            self.assertFalse(overflow_destination.exists())
+            self.assertTrue(overflow.closed)
+            self.assertEqual(list(root.iterdir()), [destination])
+
 
 class LocalPipelineTests(unittest.TestCase):
     def test_local_quick_is_private_idempotent_and_upgrades_in_place(self) -> None:
@@ -219,17 +296,31 @@ class ArxivPipelineTests(unittest.TestCase):
             </body></html>
             """
 
-            def fake_get(url: str, *, binary: bool = False, timeout: int = 45):
-                del timeout
+            def fake_get(
+                url: str,
+                *,
+                binary: bool = False,
+                timeout: int | tuple[int, int] = pipeline.HTTP_TIMEOUT,
+                max_bytes: int | None = None,
+            ):
+                del timeout, max_bytes
                 if "/abs/" in url:
                     return html
-                if "/pdf/" in url and binary:
-                    return pdf_bytes
-                if "/src/" in url and binary:
-                    return source_bytes
                 raise AssertionError(url)
 
-            with mock.patch.object(pipeline, "http_get", side_effect=fake_get):
+            def fake_download(url: str, destination: Path, *, max_bytes: int) -> None:
+                del max_bytes
+                if "/pdf/" in url:
+                    destination.write_bytes(pdf_bytes)
+                    return
+                if "/src/" in url:
+                    destination.write_bytes(source_bytes)
+                    return
+                raise AssertionError(url)
+
+            with mock.patch.object(pipeline, "http_get", side_effect=fake_get), mock.patch.object(
+                pipeline, "safe_download", side_effect=fake_download
+            ):
                 workspace, metadata = pipeline.prepare_paper(
                     "2401.12345", "deep", root / "reports", "en"
                 )
@@ -240,6 +331,38 @@ class ArxivPipelineTests(unittest.TestCase):
             self.assertTrue(source_figures)
             self.assertEqual(source_figures[0]["caption"], "Method overview")
             self.assertTrue((workspace / source_figures[0]["path"]).is_file())
+
+    def test_source_assets_are_normalized_to_png(self) -> None:
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200"><rect width="320" height="200" fill="blue"/></svg>'
+        with tempfile.TemporaryDirectory() as directory:
+            assets = Path(directory)
+            relative = pipeline.convert_source_asset(svg, "diagram.svg", assets)
+            self.assertIsNotNone(relative)
+            output = assets / Path(relative).name
+            self.assertEqual(output.suffix, ".png")
+            self.assertEqual(output.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
+    def test_source_archive_member_and_expansion_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive_path = root / "source.tar"
+            with tarfile.open(archive_path, "w") as archive:
+                for name, data in (("one.tex", b"1234"), ("two.tex", b"5678")):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+
+            with mock.patch.object(pipeline, "MAX_ARCHIVE_MEMBERS", 1):
+                with self.assertRaisesRegex(pipeline.PipelineError, "member limit"):
+                    pipeline.extract_source_bundle(archive_path, root / "members")
+
+            with mock.patch.object(pipeline, "MAX_SOURCE_EXPANDED_BYTES", 7):
+                with self.assertRaisesRegex(pipeline.PipelineError, "expansion limit"):
+                    pipeline.extract_source_bundle(archive_path, root / "expanded")
+
+            with mock.patch.object(pipeline, "MAX_ARCHIVE_MEMBER_BYTES", 3):
+                with self.assertRaisesRegex(pipeline.PipelineError, "member 'one.tex'"):
+                    pipeline.extract_source_bundle(archive_path, root / "member-size")
 
     def test_arxiv_network_failure_is_actionable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

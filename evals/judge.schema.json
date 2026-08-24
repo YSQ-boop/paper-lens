@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "grounding",
+    "coverage",
+    "uncertainty",
+    "formula_table_accuracy",
+    "overall",
+    "unsupported_claims",
+    "summary"
+  ],
+  "properties": {
+    "grounding": {"type": "integer", "minimum": 1, "maximum": 5},
+    "coverage": {"type": "integer", "minimum": 1, "maximum": 5},
+    "uncertainty": {"type": "integer", "minimum": 1, "maximum": 5},
+    "formula_table_accuracy": {"type": "integer", "minimum": 1, "maximum": 5},
+    "overall": {"type": "integer", "minimum": 1, "maximum": 5},
+    "unsupported_claims": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "summary": {"type": "string"}
+  }
+}

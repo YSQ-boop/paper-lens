@@ -1,0 +1,52 @@
+name: Pipeline bug
+description: Report a reproducible preparation, extraction, or validation failure.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not attach confidential or copyrighted PDFs. Prefer a public arXiv ID or synthetic fixture.
+  - type: input
+    id: version
+    attributes:
+      label: Paper Lens version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: input_kind
+    attributes:
+      label: Input kind
+      options:
+        - Public arXiv ID or URL
+        - Synthetic local PDF
+        - Private local PDF (do not attach)
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the command, safe input identifier, and quick/deep mode.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted logs
+      description: Remove paths, tokens, paper text, and personal data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed confidential paper content, secrets, and personal data.
+          required: true

@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a focused improvement within Paper Lens's single-paper scope.
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Describe the paper-reading workflow and current limitation.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: trust
+    attributes:
+      label: Evidence, privacy, and security impact
+      description: Explain whether this changes grounding, network access, or local-file handling.
+    validations:
+      required: true

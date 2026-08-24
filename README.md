@@ -1,174 +1,147 @@
 # Paper Lens
 
-Paper Lens 是一个面向 Codex 的单篇论文阅读插件。它先生成一份适合快速浏览的报告，并可在同一个 `report.md` 中继续扩展为 reviewer-level 深读，避免快读与深读形成两份相互漂移的文档。
+[![CI](https://github.com/YSQ-boop/paper-lens/actions/workflows/ci.yml/badge.svg)](https://github.com/YSQ-boop/paper-lens/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Codex plugin](https://img.shields.io/badge/Codex-plugin-111827)](https://developers.openai.com/plugins/)
 
-支持以下输入：
+Paper Lens is an open-source Codex plugin for trustworthy, source-grounded reading of one academic paper. It creates a fast first-pass report, then can deepen the same `report.md` into a reviewer-style analysis without splitting the evidence trail across separate documents.
 
-- arXiv ID，例如 `1706.03762`
-- arXiv 论文链接
-- 本地 PDF 的绝对路径
+[中文简介](#中文简介) · [Example report](examples/1706.03762v7/report.md) · [Roadmap](ROADMAP.md) · [Contributing](CONTRIBUTING.md)
 
-## 主要能力
+## Why Paper Lens
 
-- 默认生成 3–5 分钟可读完的快读报告
-- 按需升级为包含公式、实验、相关工作和复现评估的深读报告
-- 使用页码、章节、公式、图和表定位关键判断
-- 从 arXiv 源码与原始 PDF 中提取可用于报告的图像
-- 对本地 PDF 计算哈希并复用已有工作区
-- 深读联网失败时保留原文分析，并明确标记外部证据不完整
-- 报告语言跟随用户，保留必要的英文术语与符号
+General-purpose summaries are easy to generate and hard to audit. Paper Lens instead treats paper reading as an evidence workflow:
 
-## 使用方式
+- substantive claims point to a page, section, equation, figure, or table;
+- facts reported by the paper are distinguished from independent verification;
+- missing evidence is labeled `not reported`, `not verified`, or `partial`;
+- quick and deep reads update one durable report;
+- the PDF binary remains local, and the plugin has no telemetry or hosted backend.
 
-在新的 Codex 任务中调用 `$paper-lens`：
+The core is a deterministic Python preparation and validation pipeline plus a Codex skill that performs the analysis. The pipeline resolves arXiv versions, extracts text and clean figures, builds a constrained report skeleton, and rejects incomplete or weakly grounded outputs.
+
+## Quick start
+
+Requirements: Codex with plugin support, Git, and Python 3.10+.
+
+```bash
+git clone https://github.com/YSQ-boop/paper-lens.git ~/plugins/paper-lens
+```
+
+Add the following entry to the `plugins` array in `~/.agents/plugins/marketplace.json` (preserve any existing entries):
+
+```json
+{
+  "name": "paper-lens",
+  "source": {
+    "source": "local",
+    "path": "./plugins/paper-lens"
+  },
+  "policy": {
+    "installation": "AVAILABLE",
+    "authentication": "ON_INSTALL"
+  },
+  "category": "Productivity"
+}
+```
+
+If the file does not exist yet, initialize it with `name`, `interface`, and an empty `plugins` array before adding the entry:
+
+```json
+{
+  "name": "personal",
+  "interface": {"displayName": "Personal"},
+  "plugins": []
+}
+```
+
+Install it and start a new Codex task:
+
+```bash
+codex plugin add paper-lens@personal
+```
+
+Then invoke the skill explicitly:
 
 ```text
-$paper-lens 快读 https://arxiv.org/abs/1706.03762
+$paper-lens quick-read https://arxiv.org/abs/1706.03762v7 in English
 ```
 
 ```text
 $paper-lens 深读 /absolute/path/to/paper.pdf
 ```
 
-快读完成后，可以在同一任务中继续：
+After a quick read, `Continue with a deep review` extends the same report. Follow-up answers do not change the report unless you explicitly ask to save them.
+
+## Output and trust boundary
+
+Each paper gets one workspace under the current directory:
 
 ```text
-继续深读这篇论文
+paper-reports/<paper-key>_<title-slug>/
+├── report.md          # the durable user-facing artifact
+├── metadata.json      # provenance, status, warnings, hashes
+├── raw/               # local copy of the source PDF / arXiv inputs
+├── assets/            # normalized local PNG figures
+├── cache/             # extracted text and structured page data
+└── logs/              # preparation and validation results
 ```
 
-后续追问默认只在对话中回答。只有明确要求“写入报告”“补充到报告”或类似操作时，插件才会修改 `report.md`。
+Only `report.md` is intended as the normal deliverable. Cached paper material may be copyrighted or confidential and should not be committed. The repository's example includes only a hand-reviewed report and public bibliographic metadata—no paper PDF, source archive, extracted figures, or cache.
 
-## 输出结构
+## Modes
 
-每篇论文写入当前工作目录下的独立工作区：
+| Mode | Evidence boundary | Intended result |
+| --- | --- | --- |
+| Quick | Original paper and public arXiv metadata only | A 3–5 minute overview with source-location anchors |
+| Deep | Original paper plus verified primary literature when available | Claims–evidence matrix, formula explanation, experiment audit, critique, and reproducibility assessment |
 
-```text
-paper-reports/
-└── <paper-key>_<title-slug>/
-    ├── report.md
-    ├── metadata.json
-    ├── raw/
-    ├── assets/
-    ├── cache/
-    └── logs/
-```
+Deep mode remains useful without web access. It marks external verification as `partial` instead of silently filling gaps.
 
-- arXiv 论文使用基础 arXiv ID 作为 `paper-key`。
-- 本地 PDF 使用文件 SHA-256 的前 12 位作为 `paper-key`。
-- 快读与深读共用唯一的 `report.md`。
+## Privacy and security
 
-## 本地安装
+- The pipeline does not upload the PDF binary to OCR, translation, conversion, or paper-hosting services. Codex necessarily reads relevant extracted text to generate the report; that model processing follows the user's configured Codex/OpenAI data controls.
+- The project contains no analytics, tracking identifiers, remote logging, or hosted service.
+- arXiv inputs download only the public abstract page, PDF, and—during deep mode—the source archive.
+- Network responses and archive expansion are size-limited; extracted media is normalized to PNG before it can be embedded.
+- Scanned and encrypted PDFs fail with an actionable message. Paper Lens does not bypass access controls or paywalls.
 
-本仓库是单插件源码仓库，不是 Codex marketplace 仓库。推荐将它克隆到个人插件目录：
+See [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md) for the exact data and security boundaries.
 
-```bash
-git clone <your-repository-url> ~/plugins/paper-lens
-```
+## Development
 
-默认个人 marketplace 位于 `~/.agents/plugins/marketplace.json`。若该文件尚不存在，可创建为：
-
-```json
-{
-  "name": "personal",
-  "interface": {
-    "displayName": "Personal"
-  },
-  "plugins": [
-    {
-      "name": "paper-lens",
-      "source": {
-        "source": "local",
-        "path": "./plugins/paper-lens"
-      },
-      "policy": {
-        "installation": "AVAILABLE",
-        "authentication": "ON_INSTALL"
-      },
-      "category": "Productivity"
-    }
-  ]
-}
-```
-
-若 personal marketplace 已包含其他插件，只添加上面的 `paper-lens` 条目，不要覆盖原有内容。随后安装插件：
-
-```bash
-codex plugin add paper-lens@personal
-```
-
-安装后新建一个 Codex 任务，使 `$paper-lens` 被重新发现。
-
-## Python 依赖
-
-流水线使用 Python 3、PyMuPDF、Requests 和 Beautiful Soup。缺少依赖时运行：
+Create the isolated runtime used by the skill:
 
 ```bash
 bash skills/paper-lens/scripts/bootstrap.sh
 ```
 
-脚本会在 `~/.cache/paper-lens/venv` 中创建隔离环境，不会修改当前项目的 Python 环境。它会打印可用于运行流水线和测试的 Python 路径。
-
-统一的内部命令是：
-
-```bash
-python skills/paper-lens/scripts/paper_pipeline.py prepare \
-  --input "<arXiv ID、arXiv URL 或本地 PDF>" \
-  --mode quick \
-  --output-root "$PWD/paper-reports" \
-  --language zh
-```
-
-```bash
-python skills/paper-lens/scripts/paper_pipeline.py validate \
-  --workspace "<paper workspace>" \
-  --mode quick
-```
-
-通常不需要手动执行这些命令，Codex 会依据 skill 工作流调用它们。
-
-## 隐私与联网边界
-
-- 本地 PDF 只会复制到本地 `paper-reports` 工作区，不会上传到翻译、OCR、转换或论文托管服务。
-- 快读不检索外部相关文献，只使用论文原文和原始元数据。
-- 深读可以使用论文标题或主题词检索相关文献，但不会上传本地 PDF。
-- 若论文尚未公开或包含敏感信息，应避免联网检索，或仅生成基于原文的深读并标记为 `partial`。
-
-## 当前限制
-
-- 一次只处理一篇论文，不用于多论文综述或知识库建设。
-- 不包含 OCR；纯扫描或图片型 PDF 需要先在本地完成 OCR。
-- 不绕过付费墙、访问控制或受限下载。
-- 不提供自定义面板、云同步或团队共享后端。
-
-## 开发与测试
-
-安装依赖后运行：
+The script prints the Python executable. With the default cache location:
 
 ```bash
 ~/.cache/paper-lens/venv/bin/python -m unittest discover -s tests -v
+~/.cache/paper-lens/venv/bin/python skills/paper-lens/scripts/paper_pipeline.py --version
 ```
 
-校验 skill 和插件清单：
+The deterministic pipeline can also be run directly:
 
 ```bash
-python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/paper-lens
-python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py .
+~/.cache/paper-lens/venv/bin/python skills/paper-lens/scripts/paper_pipeline.py prepare \
+  --input "1706.03762v7" --mode quick --output-root "$PWD/paper-reports" --language en
 ```
 
-项目结构：
+See [CONTRIBUTING.md](CONTRIBUTING.md) for tests, validation, pull-request expectations, and the optional model evaluation suite.
 
-```text
-.
-├── .codex-plugin/
-│   └── plugin.json
-├── skills/
-│   └── paper-lens/
-│       ├── SKILL.md
-│       ├── agents/
-│       ├── references/
-│       ├── scripts/
-│       └── requirements.txt
-└── tests/
-    └── test_pipeline.py
-```
+## Project status
 
+Paper Lens is early-stage and maintained in public. Current priorities are evaluator baselines, broader PDF coverage, report-contract stability, and documented real-world use. The project deliberately does not claim adoption or quality scores that have not been measured; [IMPACT.md](IMPACT.md) records dated public evidence.
+
+## 中文简介
+
+Paper Lens 是一个开源 Codex 单篇论文阅读插件。它把“可信、可核对”放在摘要速度之前：重要判断必须指向页码、章节、公式、图或表；证据缺失时明确标注“未报告 / 未验证 / 部分完成”；快读与深读持续写入同一份 `report.md`。
+
+支持 arXiv ID、arXiv 链接和本地 PDF。默认快读只使用论文原文；深读可核验相关的一手文献。流水线不上传 PDF 文件本身，但 Codex 会读取相关的抽取文本来生成报告；项目不含遥测或自建云端后端。安装、命令和开发说明以上方英文文档为准，中文讨论和贡献同样欢迎。
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

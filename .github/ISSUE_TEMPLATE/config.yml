@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/YSQ-boop/paper-lens/security
+    about: Report security issues privately; do not open a public issue.

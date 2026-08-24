@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import shutil
 import sys
@@ -36,8 +37,18 @@ except ImportError:  # pragma: no cover
     BeautifulSoup = None
 
 
+PLUGIN_VERSION = "0.2.0"
 SCHEMA_VERSION = 1
-USER_AGENT = "paper-lens/0.1.0"
+USER_AGENT = f"paper-lens/{PLUGIN_VERSION}"
+HTTP_TIMEOUT = (10, 60)
+MAX_HTML_BYTES = 5 * 1024 * 1024
+MAX_PDF_BYTES = 100 * 1024 * 1024
+MAX_SOURCE_ARCHIVE_BYTES = 200 * 1024 * 1024
+MAX_ARCHIVE_MEMBER_BYTES = 50 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 2_000
+MAX_SOURCE_EXPANDED_BYTES = 250 * 1024 * 1024
+MAX_SOURCE_IMAGE_PIXELS = 40_000_000
+DOWNLOAD_CHUNK_BYTES = 64 * 1024
 MODERN_ARXIV_RE = re.compile(r"(?<!\d)(?P<base>\d{4}\.\d{4,5})(?P<version>v\d+)?", re.I)
 LEGACY_ARXIV_RE = re.compile(
     r"(?P<base>[a-z][a-z0-9.-]+(?:/[0-9]{7}))(?P<version>v\d+)?",
@@ -151,14 +162,51 @@ def require_network_support() -> None:
         )
 
 
-def http_get(url: str, *, binary: bool = False, timeout: int = 45) -> bytes | str:
+def http_get(
+    url: str,
+    *,
+    binary: bool = False,
+    timeout: int | tuple[int, int] = HTTP_TIMEOUT,
+    max_bytes: int | None = None,
+) -> bytes | str:
     require_network_support()
+    limit = max_bytes if max_bytes is not None else (MAX_PDF_BYTES if binary else MAX_HTML_BYTES)
+    response = None
     try:
-        response = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
+        response = requests.get(
+            url,
+            timeout=timeout,
+            headers={"User-Agent": USER_AGENT},
+            stream=True,
+        )
         response.raise_for_status()
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                announced_size = int(content_length)
+            except ValueError:
+                announced_size = 0
+            if announced_size > limit:
+                raise PipelineError(
+                    f"Refused {url}: response declares {announced_size} bytes; limit is {limit}."
+                )
+        payload = bytearray()
+        for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES):
+            if not chunk:
+                continue
+            payload.extend(chunk)
+            if len(payload) > limit:
+                raise PipelineError(f"Refused {url}: response exceeded the {limit}-byte limit.")
+        encoding = response.encoding or "utf-8"
+    except PipelineError:
+        raise
     except Exception as exc:
         raise PipelineError(f"Could not fetch {url}: {exc}") from exc
-    return response.content if binary else response.text
+    finally:
+        if response is not None:
+            response.close()
+    result = bytes(payload)
+    return result if binary else result.decode(encoding, errors="replace")
 
 
 def parse_arxiv_metadata(html: str, base_id: str, requested_version: str | None) -> dict[str, Any]:
@@ -239,7 +287,7 @@ def inspect_pdf(path: Path) -> dict[str, Any]:
         if text_characters < threshold:
             raise PipelineError(
                 "The PDF appears scanned or image-only and has too little extractable text. "
-                "Paper Lens v0.1 does not provide OCR; run OCR locally and retry."
+                "Paper Lens does not provide OCR; run OCR locally and retry."
             )
         metadata = document.metadata or {}
         return {
@@ -289,15 +337,52 @@ def write_pdf_cache(workspace: Path, inspection: dict[str, Any]) -> None:
     write_text(workspace / "cache" / "paper.txt", text + "\n")
 
 
-def safe_download(url: str, destination: Path) -> None:
-    payload = http_get(url, binary=True)
-    if not isinstance(payload, bytes) or not payload:
-        raise PipelineError(f"Downloaded an empty response from {url}")
+def safe_download(url: str, destination: Path, *, max_bytes: int) -> None:
+    require_network_support()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("wb", dir=destination.parent, delete=False) as handle:
-        handle.write(payload)
-        temp_path = Path(handle.name)
-    temp_path.replace(destination)
+    temp_path: Path | None = None
+    response = None
+    try:
+        response = requests.get(
+            url,
+            timeout=HTTP_TIMEOUT,
+            headers={"User-Agent": USER_AGENT},
+            stream=True,
+        )
+        response.raise_for_status()
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                announced_size = int(content_length)
+            except ValueError:
+                announced_size = 0
+            if announced_size > max_bytes:
+                raise PipelineError(
+                    f"Refused {url}: response declares {announced_size} bytes; limit is {max_bytes}."
+                )
+        downloaded = 0
+        with tempfile.NamedTemporaryFile("wb", dir=destination.parent, delete=False) as handle:
+            temp_path = Path(handle.name)
+            for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_BYTES):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > max_bytes:
+                    raise PipelineError(f"Refused {url}: response exceeded the {max_bytes}-byte limit.")
+                handle.write(chunk)
+        if downloaded == 0:
+            raise PipelineError(f"Downloaded an empty response from {url}")
+        temp_path.replace(destination)
+        temp_path = None
+    except PipelineError:
+        raise
+    except Exception as exc:
+        raise PipelineError(f"Could not fetch {url}: {exc}") from exc
+    finally:
+        if response is not None:
+            response.close()
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def extract_pdf_images(pdf_path: Path, assets_dir: Path) -> list[dict[str, Any]]:
@@ -315,6 +400,8 @@ def extract_pdf_images(pdf_path: Path, assets_dir: Path) -> list[dict[str, Any]]
                 try:
                     pixmap = fitz.Pixmap(document, xref)
                     if pixmap.width < 200 or pixmap.height < 150 or pixmap.width * pixmap.height < 60000:
+                        continue
+                    if pixmap.width * pixmap.height > MAX_SOURCE_IMAGE_PIXELS:
                         continue
                     if pixmap.colorspace is None:
                         continue
@@ -351,22 +438,28 @@ def convert_source_asset(data: bytes, archive_name: str, assets_dir: Path) -> st
     suffix = Path(archive_name).suffix.lower()
     digest = hashlib.sha256(archive_name.encode("utf-8")).hexdigest()[:8]
     stem = slugify(Path(archive_name).stem, fallback="figure", max_length=55)
-    if suffix == ".pdf":
-        require_pdf_support()
-        try:
-            document = fitz.open(stream=data, filetype="pdf")
-            if document.page_count == 0:
-                return None
-            pixmap = document[0].get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
-            output = assets_dir / f"source-{stem}-{digest}.png"
-            pixmap.save(output)
-            document.close()
-            return f"assets/{output.name}"
-        except Exception:
+    require_pdf_support()
+    document = None
+    try:
+        document = fitz.open(stream=data, filetype=suffix.removeprefix("."))
+        if document.page_count == 0:
             return None
-    output = assets_dir / f"source-{stem}-{digest}{suffix}"
-    output.write_bytes(data)
-    return f"assets/{output.name}"
+        page = document[0]
+        rect = page.rect
+        if rect.width <= 0 or rect.height <= 0:
+            return None
+        scale = min(2.0, math.sqrt(MAX_SOURCE_IMAGE_PIXELS / (rect.width * rect.height)))
+        pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        if pixmap.width * pixmap.height > MAX_SOURCE_IMAGE_PIXELS:
+            return None
+        output = assets_dir / f"source-{stem}-{digest}.png"
+        pixmap.save(output)
+        return f"assets/{output.name}"
+    except Exception:
+        return None
+    finally:
+        if document is not None:
+            document.close()
 
 
 def parse_figure_context(source_text: str, source_assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -411,17 +504,36 @@ def extract_source_bundle(source_tar: Path, workspace: Path) -> tuple[list[dict[
     except tarfile.TarError as exc:
         return [], "", [f"Could not open the arXiv source archive: {exc}"]
     with archive:
-        for member in archive.getmembers():
+        member_count = 0
+        selected_bytes = 0
+        for member in archive:
+            member_count += 1
+            if member_count > MAX_ARCHIVE_MEMBERS:
+                raise PipelineError(
+                    f"The arXiv source archive exceeds the {MAX_ARCHIVE_MEMBERS}-member limit."
+                )
             safe_name = safe_archive_name(member.name)
-            if not safe_name or not member.isfile() or member.size > 50 * 1024 * 1024:
+            if not safe_name or not member.isfile():
                 continue
             suffix = Path(safe_name).suffix.lower()
             if suffix not in SOURCE_IMAGE_SUFFIXES and suffix != ".tex":
                 continue
+            if member.size < 0 or member.size > MAX_ARCHIVE_MEMBER_BYTES:
+                raise PipelineError(
+                    f"Archive member {safe_name!r} exceeds the {MAX_ARCHIVE_MEMBER_BYTES}-byte limit."
+                )
+            selected_bytes += member.size
+            if selected_bytes > MAX_SOURCE_EXPANDED_BYTES:
+                raise PipelineError(
+                    "Selected arXiv source files exceed the "
+                    f"{MAX_SOURCE_EXPANDED_BYTES}-byte expansion limit."
+                )
             extracted = archive.extractfile(member)
             if extracted is None:
                 continue
-            data = extracted.read()
+            data = extracted.read(member.size + 1)
+            if len(data) > member.size or len(data) > MAX_ARCHIVE_MEMBER_BYTES:
+                raise PipelineError(f"Archive member {safe_name!r} expanded beyond its declared size.")
             if suffix == ".tex":
                 tex_parts.append(f"\n% BEGIN {safe_name}\n{data.decode('utf-8', errors='replace')}\n% END {safe_name}\n")
                 continue
@@ -641,6 +753,8 @@ def prepare_local_pdf(
         raise PipelineError(f"Local PDF does not exist: {source_path}")
     if source_path.suffix.lower() != ".pdf":
         raise PipelineError(f"Only local .pdf files are supported: {source_path}")
+    if source_path.stat().st_size > MAX_PDF_BYTES:
+        raise PipelineError(f"Local PDF exceeds the {MAX_PDF_BYTES}-byte limit: {source_path}")
     source_hash = sha256_file(source_path)
     inspection = inspect_pdf(source_path)
     title = inspection["title"] or source_path.stem
@@ -709,7 +823,7 @@ def prepare_arxiv(
         raise PipelineError(f"Could not parse an arXiv ID from: {input_value}")
     base_id, requested_version = parsed
     initial_url = f"https://arxiv.org/abs/{base_id}{requested_version or ''}"
-    html = http_get(initial_url)
+    html = http_get(initial_url, max_bytes=MAX_HTML_BYTES)
     if not isinstance(html, str):
         raise PipelineError(f"Expected HTML metadata from {initial_url}")
     arxiv = parse_arxiv_metadata(html, base_id, requested_version)
@@ -722,7 +836,7 @@ def prepare_arxiv(
     write_text(workspace / "raw" / "abs.html", html)
     pdf_path = workspace / "raw" / "paper.pdf"
     if refresh or source_changed or not pdf_path.exists():
-        safe_download(arxiv["pdf_url"], pdf_path)
+        safe_download(arxiv["pdf_url"], pdf_path, max_bytes=MAX_PDF_BYTES)
     inspection = inspect_pdf(pdf_path)
     source_hash = sha256_file(pdf_path)
     write_pdf_cache(workspace, inspection)
@@ -734,14 +848,20 @@ def prepare_arxiv(
     figures: list[dict[str, Any]] = []
     if mode == "deep":
         source_tar = workspace / "raw" / "source.tar"
+        source_ready = source_tar.exists() and not (refresh or source_changed)
         if refresh or source_changed or not source_tar.exists():
             try:
-                safe_download(arxiv["source_url"], source_tar)
+                safe_download(
+                    arxiv["source_url"],
+                    source_tar,
+                    max_bytes=MAX_SOURCE_ARCHIVE_BYTES,
+                )
+                source_ready = True
             except PipelineError as exc:
                 warnings.append(str(exc))
         source_assets: list[dict[str, Any]] = []
         source_text = ""
-        if source_tar.exists():
+        if source_ready:
             source_assets, source_text, source_warnings = extract_source_bundle(source_tar, workspace)
             warnings.extend(source_warnings)
         figures.extend(parse_figure_context(source_text, source_assets))
@@ -813,6 +933,9 @@ def prepare_paper(
         raise PipelineError("Mode must be quick or deep.")
     normalized_language = normalize_language(language)
     root = Path(output_root).expanduser().resolve()
+    parsed_input = urlparse(input_value.strip())
+    if parsed_input.scheme and parsed_input.netloc and "arxiv.org" not in parsed_input.netloc.lower():
+        raise PipelineError("Paper Lens accepts only an arXiv URL/ID or an existing local .pdf path.")
     local_candidate = Path(input_value).expanduser()
     if local_candidate.exists() or local_candidate.suffix.lower() == ".pdf":
         return prepare_local_pdf(input_value, normalized_mode, root, normalized_language, refresh)
@@ -953,6 +1076,7 @@ def validate_workspace(workspace: Path | str, mode: str) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare and validate Paper Lens workspaces.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {PLUGIN_VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
     prepare = subparsers.add_parser("prepare", help="Prepare a paper workspace and report skeleton.")
     prepare.add_argument("--input", required=True, help="arXiv URL/ID or an existing local PDF path")

@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: skills/paper-lens/requirements.txt
+      - name: Install and test
+        run: |
+          python -m pip install -r skills/paper-lens/requirements.txt
+          python -m unittest discover -s tests -v
+      - name: Verify tag and build archive
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          manifest_version="$(python -c 'import json; print(json.load(open(".codex-plugin/plugin.json"))["version"].split("+", 1)[0])')"
+          test "$version" = "$manifest_version"
+          archive="paper-lens-${version}.zip"
+          git archive --format=zip --prefix="paper-lens-${version}/" --output="$archive" "$GITHUB_SHA"
+          sha256sum "$archive" > "${archive}.sha256"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          archive="paper-lens-${version}.zip"
+          gh release create "$RELEASE_TAG" "$archive" "${archive}.sha256" --verify-tag --generate-notes

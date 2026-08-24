@@ -4,3 +4,8 @@ __pycache__/
 .venv/
 .venv-*/
 paper-reports/
+evals/runs/
+evals/inputs/
+*.pdf
+*.tar
+*.tar.gz

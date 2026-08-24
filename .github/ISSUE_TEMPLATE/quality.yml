@@ -1,0 +1,41 @@
+name: Report quality issue
+description: Report an unsupported, missing, or incorrectly grounded paper-analysis claim.
+title: "[Quality]: "
+labels: ["quality", "triage"]
+body:
+  - type: input
+    id: source
+    attributes:
+      label: Public paper source
+      description: Prefer an arXiv ID. Do not attach a copyrighted or private PDF.
+      placeholder: "1706.03762v7"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options: [Quick, Deep]
+    validations:
+      required: true
+  - type: textarea
+    id: claim
+    attributes:
+      label: Problematic report claim
+      description: Quote only the minimum necessary excerpt.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Expected evidence or correction
+      description: Point to a page, section, equation, figure, table, or primary source.
+    validations:
+      required: true
+  - type: checkboxes
+    id: permission
+    attributes:
+      label: Regression use
+      options:
+        - label: This report may be cited as a public, redacted regression example.
+          required: false

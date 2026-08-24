@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "transformer-en-quick",
+      "kind": "positive",
+      "input_kind": "arxiv",
+      "input": "1706.03762v7",
+      "mode": "quick",
+      "language": "en"
+    },
+    {
+      "id": "bert-zh-quick",
+      "kind": "positive",
+      "input_kind": "arxiv",
+      "input": "1810.04805v2",
+      "mode": "quick",
+      "language": "zh"
+    },
+    {
+      "id": "legacy-arxiv-en-quick",
+      "kind": "positive",
+      "input_kind": "arxiv",
+      "input": "cs/9901001",
+      "mode": "quick",
+      "language": "en"
+    },
+    {
+      "id": "synthetic-local-en-quick",
+      "kind": "positive",
+      "input_kind": "fixture",
+      "input": "synthetic-text",
+      "mode": "quick",
+      "language": "en"
+    },
+    {
+      "id": "transformer-en-deep-source-only",
+      "kind": "positive",
+      "input_kind": "arxiv",
+      "input": "1706.03762v7",
+      "mode": "deep",
+      "language": "en",
+      "source_only": true
+    },
+    {
+      "id": "invalid-non-arxiv-url",
+      "kind": "negative",
+      "input_kind": "literal",
+      "input": "https://example.com/paper.pdf",
+      "expected_error": "accepts only an arXiv URL/ID or an existing local .pdf path"
+    },
+    {
+      "id": "encrypted-local-pdf",
+      "kind": "negative",
+      "input_kind": "fixture",
+      "input": "encrypted",
+      "expected_error": "encrypted"
+    },
+    {
+      "id": "scanned-local-pdf",
+      "kind": "negative",
+      "input_kind": "fixture",
+      "input": "scanned",
+      "expected_error": "OCR"
+    }
+  ]
+}

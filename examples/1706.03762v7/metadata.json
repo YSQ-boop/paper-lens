@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "paper_key": "1706.03762",
+  "input": {
+    "kind": "arxiv",
+    "original": "1706.03762v7"
+  },
+  "arxiv": {
+    "paper_id": "1706.03762v7",
+    "abs_url": "https://arxiv.org/abs/1706.03762v7"
+  },
+  "title": "Attention Is All You Need",
+  "language": "en",
+  "requested_mode": "quick",
+  "status": "quick_complete",
+  "note": "Public bibliographic metadata only; no paper PDF, cache, or extracted assets are included."
+}
