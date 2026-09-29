@@ -4,6 +4,10 @@ Notable changes are documented here. The project follows Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Deterministic validation and a public schema for reviewed online evaluation summaries.
+
 ## [0.2.0] - 2026-08-24
 
 ### Added

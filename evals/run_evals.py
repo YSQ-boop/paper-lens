@@ -30,6 +30,7 @@ SCORE_FIELDS = (
     "overall",
 )
 CODEX_TIMEOUT_SECONDS = 20 * 60
+SUMMARY_SCHEMA_VERSION = 1
 
 SPEC = importlib.util.spec_from_file_location("paper_lens_eval_pipeline", PIPELINE_PATH)
 pipeline = importlib.util.module_from_spec(SPEC)
@@ -43,6 +44,10 @@ class EvalError(RuntimeError):
 
 def utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def utc_date() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -289,6 +294,207 @@ def parse_jsonl_usage(output: str) -> dict[str, int]:
     return totals
 
 
+def aggregate_usage(results: Iterable[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Aggregate per-case author and judge usage without retaining raw traces."""
+
+    aggregate: dict[str, dict[str, int]] = {"author": {}, "judge": {}}
+    for result in results:
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        for role in ("author", "judge"):
+            role_usage = usage.get(role)
+            if not isinstance(role_usage, dict):
+                continue
+            for key, value in role_usage.items():
+                if type(value) is int and value >= 0:
+                    aggregate[role][key] = aggregate[role].get(key, 0) + value
+    total: dict[str, int] = {}
+    for role_usage in aggregate.values():
+        for key, value in role_usage.items():
+            total[key] = total.get(key, 0) + value
+    aggregate["total"] = total
+    return aggregate
+
+
+def _is_non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_usage(
+    value: Any, path: str, errors: list[str], *, allow_empty: bool = False
+) -> None:
+    if not isinstance(value, dict) or (not value and not allow_empty):
+        errors.append(f"{path} must be a non-empty object of token counters")
+        return
+    for key, counter in value.items():
+        if not isinstance(key, str) or not key:
+            errors.append(f"{path} contains an invalid counter name")
+        if type(counter) is not int or counter < 0:
+            errors.append(f"{path}.{key} must be a non-negative integer")
+
+
+def _validate_aggregate_usage(
+    value: Any, path: str, errors: list[str], *, allow_empty: bool = False
+) -> None:
+    if not isinstance(value, dict):
+        errors.append(f"{path} must contain author, judge, and total token counters")
+        return
+    for role in ("author", "judge", "total"):
+        _validate_usage(
+            value.get(role), f"{path}.{role}", errors, allow_empty=allow_empty
+        )
+
+
+def validate_summary(
+    summary: Any, *, mode: str | None = None, strict_online: bool = False
+) -> list[str]:
+    """Return deterministic, human-readable errors for an evaluation summary.
+
+    The validator intentionally checks the public aggregate contract rather than
+    requiring raw reports, prompts, traces, or private paper content.
+    """
+
+    errors: list[str] = []
+    if not isinstance(summary, dict):
+        return ["summary must be a JSON object"]
+
+    if summary.get("schema_version") != SUMMARY_SCHEMA_VERSION:
+        errors.append("schema_version must be 1")
+    actual_mode = summary.get("mode")
+    if actual_mode not in {"online", "offline"}:
+        errors.append("mode must be online or offline")
+    elif mode is not None and actual_mode != mode:
+        errors.append(f"mode must be {mode} for this validation")
+
+    for field in ("created_at", "evaluation_date"):
+        if not _is_non_empty_string(summary.get(field)):
+            errors.append(f"{field} must be a non-empty string")
+    selected_case_ids = summary.get("selected_case_ids")
+    if not isinstance(selected_case_ids, list) or not selected_case_ids:
+        errors.append("selected_case_ids must be a non-empty list")
+        selected_case_ids = []
+    elif any(not _is_non_empty_string(case_id) for case_id in selected_case_ids):
+        errors.append("selected_case_ids must contain non-empty strings")
+    if all(_is_non_empty_string(case_id) for case_id in selected_case_ids) and len(
+        set(selected_case_ids)
+    ) != len(selected_case_ids):
+        errors.append("selected_case_ids must be unique")
+
+    results = summary.get("results")
+    if not isinstance(results, list) or not results:
+        errors.append("results must be a non-empty list")
+        results = []
+    result_ids: list[str] = []
+    for index, result in enumerate(results):
+        path = f"results[{index}]"
+        if not isinstance(result, dict):
+            errors.append(f"{path} must be an object")
+            continue
+        result_id = result.get("id")
+        if not _is_non_empty_string(result_id):
+            errors.append(f"{path}.id must be a non-empty string")
+        else:
+            result_ids.append(result_id)
+        if result.get("kind") not in {"positive", "negative"}:
+            errors.append(f"{path}.kind must be positive or negative")
+        result_passed = result.get("passed")
+        if actual_mode == "offline":
+            skipped_online = result.get("scope") == "skipped-online-case"
+            if result_passed is not None and type(result_passed) is not bool:
+                errors.append(f"{path}.passed must be boolean or null for skipped online cases")
+            if result_passed is None and not skipped_online:
+                errors.append(f"{path}.passed may be null only for skipped online cases")
+        elif type(result_passed) is not bool:
+            errors.append(f"{path}.passed must be boolean")
+
+        if actual_mode == "online" and result.get("kind") == "positive":
+            failed_with_error = (
+                result_passed is False and _is_non_empty_string(result.get("error"))
+            )
+            judgment = result.get("judgment")
+            if not isinstance(judgment, dict):
+                if strict_online or not failed_with_error:
+                    errors.append(f"{path}.judgment is required for online positive cases")
+            else:
+                for field in SCORE_FIELDS:
+                    score = judgment.get(field)
+                    if type(score) is not int or not 1 <= score <= 5:
+                        errors.append(f"{path}.judgment.{field} must be an integer from 1 to 5")
+                unsupported_claims = judgment.get("unsupported_claims")
+                if not isinstance(unsupported_claims, list) or any(
+                    not isinstance(claim, str) for claim in unsupported_claims
+                ):
+                    errors.append(
+                        f"{path}.judgment.unsupported_claims must be a list of strings"
+                    )
+            if type(result.get("deterministic_validation")) is not bool:
+                if strict_online or not failed_with_error:
+                    errors.append(f"{path}.deterministic_validation must be boolean")
+            usage = result.get("usage")
+            if not isinstance(usage, dict):
+                if strict_online or not failed_with_error:
+                    errors.append(f"{path}.usage is required for online positive cases")
+            else:
+                _validate_usage(
+                    usage.get("author"),
+                    f"{path}.usage.author",
+                    errors,
+                    allow_empty=failed_with_error and not strict_online,
+                )
+                _validate_usage(
+                    usage.get("judge"),
+                    f"{path}.usage.judge",
+                    errors,
+                    allow_empty=failed_with_error and not strict_online,
+                )
+
+    if len(set(result_ids)) != len(result_ids):
+        errors.append("results ids must be unique")
+    if all(_is_non_empty_string(case_id) for case_id in selected_case_ids) and set(
+        result_ids
+    ) != set(selected_case_ids):
+        errors.append("results ids must exactly match selected_case_ids")
+
+    passed = summary.get("passed")
+    if type(passed) is not bool:
+        errors.append("passed must be boolean")
+    elif results:
+        if actual_mode == "online":
+            expected_passed = all(
+                isinstance(result, dict) and result.get("passed") is True
+                for result in results
+            )
+        else:
+            expected_passed = not any(
+                isinstance(result, dict) and result.get("passed") is False
+                for result in results
+            )
+        if passed != expected_passed:
+            errors.append("passed does not match the deterministic result policy")
+
+    if actual_mode == "online":
+        for field in ("git_commit", "codex_version", "model", "judge_model"):
+            if not _is_non_empty_string(summary.get(field)):
+                errors.append(f"{field} must be a non-empty string for online summaries")
+        _validate_aggregate_usage(
+            summary.get("usage"), "usage", errors, allow_empty=not strict_online
+        )
+    return errors
+
+
+def validate_baseline_summary(summary: Any) -> list[str]:
+    """Validate a reviewed online baseline candidate."""
+
+    return validate_summary(summary, mode="online", strict_online=True)
+
+
+def assert_valid_summary(summary: dict[str, Any], *, mode: str) -> None:
+    errors = validate_summary(summary, mode=mode)
+    if errors:
+        raise EvalError("Invalid evaluation summary: " + "; ".join(errors))
+
+
 def judge_passed(judgment: dict[str, Any]) -> bool:
     try:
         scores = [int(judgment[field]) for field in SCORE_FIELDS]
@@ -476,13 +682,16 @@ def main(argv: Iterable[str] | None = None) -> int:
             results = offline_preflight(cases, output)
             failed = [result for result in results if result.get("passed") is False]
             summary = {
-                "schema_version": 1,
+                "schema_version": SUMMARY_SCHEMA_VERSION,
                 "mode": "offline",
                 "created_at": utc_stamp(),
+                "evaluation_date": utc_date(),
+                "selected_case_ids": [case["id"] for case in cases],
                 "results": results,
                 "passed": not failed,
                 "note": "Online model cases were not scored.",
             }
+            assert_valid_summary(summary, mode="offline")
             write_json(output / "summary.json", summary)
             print(json.dumps(summary, ensure_ascii=False, indent=2))
             return 0 if not failed else 1
@@ -531,9 +740,10 @@ def main(argv: Iterable[str] | None = None) -> int:
                 write_json(output / case["id"] / "result.json", result)
 
         summary = {
-            "schema_version": 1,
+            "schema_version": SUMMARY_SCHEMA_VERSION,
             "mode": "online",
             "created_at": utc_stamp(),
+            "evaluation_date": utc_date(),
             "git_commit": subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=ROOT,
@@ -546,9 +756,12 @@ def main(argv: Iterable[str] | None = None) -> int:
             ).stdout.strip(),
             "model": args.model,
             "judge_model": judge_model,
+            "selected_case_ids": [case["id"] for case in cases],
             "results": results,
+            "usage": aggregate_usage(results),
             "passed": all(result.get("passed") is True for result in results),
         }
+        assert_valid_summary(summary, mode="online")
         write_json(output / "summary.json", summary)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0 if summary["passed"] else 1
