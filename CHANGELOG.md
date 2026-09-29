@@ -10,6 +10,8 @@ Notable changes are documented here. The project follows Semantic Versioning.
 
 ## [0.3.0] - 2026-09-29
 
+> Release gate: the `v0.3.0` tag remains pending until the complete online suite is run and manually reviewed; no model-quality score is claimed yet.
+
 ### Added
 
 - Formula/table grounding checks with actionable line and block diagnostics, including English and Chinese regression fixtures.

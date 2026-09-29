@@ -139,7 +139,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for tests, validation, pull-request expec
 
 ## Project status
 
-Paper Lens is early-stage and maintained in public. Current priorities are evaluator baselines, broader PDF coverage, report-contract stability, and documented real-world use. The project deliberately does not claim adoption or quality scores that have not been measured; [IMPACT.md](IMPACT.md) records dated public evidence.
+Paper Lens is early-stage and maintained in public. The `0.3.0` candidate is on `main`; its formal tag/release is gated on a complete reviewed online evaluator baseline. Current priorities are that baseline, broader PDF coverage, report-contract stability, and documented real-world use. The project deliberately does not claim adoption or quality scores that have not been measured; [IMPACT.md](IMPACT.md) records dated public evidence.
 
 ## 中文简介
 
