@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import posixpath
 import re
 import shutil
 import sys
@@ -14,7 +15,7 @@ import tarfile
 import tempfile
 import unicodedata
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
@@ -37,7 +38,7 @@ except ImportError:  # pragma: no cover
     BeautifulSoup = None
 
 
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 SCHEMA_VERSION = 1
 USER_AGENT = f"paper-lens/{PLUGIN_VERSION}"
 HTTP_TIMEOUT = (10, 60)
@@ -63,6 +64,26 @@ ANCHOR_RE = re.compile(
     r"\bfig(?:ure|\.)?\s*\d+|图\s*\d+|"
     r"\btable\s*\d+|表\s*\d+)",
     re.I,
+)
+FORMULA_DISCUSSION_RE = re.compile(
+    r"\b(?:formula(?:e|s)?|equation(?:s)?|loss function|objective function|mathematical)\b|"
+    r"公式|方程(?:式)?|损失函数|目标函数|数学表达式",
+    re.I,
+)
+TABLE_DISCUSSION_RE = re.compile(
+    r"\b(?:table|tab\.)\s*\d*\b|主结果表|结果表|消融表|数据规模表|表格|表\s*\d+",
+    re.I,
+)
+NOT_REPORTED_RE = re.compile(
+    r"\b(?:not\s+(?:reported|provided|shown|specified|available)|not\s+presented|"
+    r"no\s+(?:formula|equation|table)|unreported)\b|"
+    r"未(?:报告|提供|展示|给出)|没有(?:报告|提供|公式|方程|表格)|不存在",
+    re.I,
+)
+TEX_INCLUDE_RE = re.compile(r"\\(?:input|include)\s*\{([^{}]+)\}")
+TEX_FILE_MARKER_RE = re.compile(r"% PAPER_LENS_FILE: (?P<path>[^\n]+)")
+TEX_FIGURE_BLOCK_RE = re.compile(
+    r"\\begin\{figure\*?\}(.*?)\\end\{figure\*?\}", re.S | re.I
 )
 MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\((https?://[^)\s]+)\)")
 MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
@@ -428,8 +449,11 @@ def extract_pdf_images(pdf_path: Path, assets_dir: Path) -> list[dict[str, Any]]
 
 
 def safe_archive_name(name: str) -> str | None:
-    path = Path(name)
-    if path.is_absolute() or ".." in path.parts:
+    normalized = name.replace("\\", "/")
+    if re.match(r"^[A-Za-z]:/", normalized):
+        return None
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or ".." in path.parts or str(path) in {"", "."}:
         return None
     return path.as_posix()
 
@@ -438,6 +462,7 @@ def convert_source_asset(data: bytes, archive_name: str, assets_dir: Path) -> st
     suffix = Path(archive_name).suffix.lower()
     digest = hashlib.sha256(archive_name.encode("utf-8")).hexdigest()[:8]
     stem = slugify(Path(archive_name).stem, fallback="figure", max_length=55)
+    assets_dir.mkdir(parents=True, exist_ok=True)
     require_pdf_support()
     document = None
     try:
@@ -462,11 +487,143 @@ def convert_source_asset(data: bytes, archive_name: str, assets_dir: Path) -> st
             document.close()
 
 
+def normalize_source_reference(reference: str, source_file: str = "") -> str | None:
+    normalized = reference.strip().replace("\\", "/")
+    if not normalized or normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        return None
+    candidate = posixpath.normpath(posixpath.join(posixpath.dirname(source_file), normalized))
+    if candidate in {"", "."} or candidate == ".." or candidate.startswith("../"):
+        return None
+    return candidate
+
+
+def resolve_tex_sources(tex_files: dict[str, str]) -> tuple[str, list[str]]:
+    """Expand safe relative TeX includes without executing TeX or archive files."""
+
+    warnings: list[str] = []
+    warning_set: set[str] = set()
+    expanded: set[str] = set()
+    stack: list[str] = []
+
+    def warn(message: str) -> None:
+        if message not in warning_set:
+            warning_set.add(message)
+            warnings.append(message)
+
+    def resolve_include(source_file: str, reference: str) -> str | None:
+        normalized = normalize_source_reference(reference, source_file)
+        if normalized is None:
+            warn(
+                f"Unsafe TeX include {reference!r} in {source_file}; the reference was not expanded."
+            )
+            return None
+        candidates = [normalized]
+        if not PurePosixPath(normalized).suffix:
+            candidates.append(f"{normalized}.tex")
+        for candidate in candidates:
+            if candidate in tex_files:
+                return candidate
+        warn(
+            f"Missing TeX include {reference!r} referenced from {source_file}; "
+            "the reference was not expanded."
+        )
+        return None
+
+    def render(path: str) -> str:
+        if path in stack:
+            cycle = " -> ".join([*stack, path])
+            warn(f"TeX include cycle detected: {cycle}.")
+            return ""
+        if path in expanded:
+            return ""
+        expanded.add(path)
+        stack.append(path)
+        body = tex_files[path]
+        chunks = [f"% PAPER_LENS_FILE: {path}\n"]
+        cursor = 0
+        for match in TEX_INCLUDE_RE.finditer(body):
+            line_start = body.rfind("\n", 0, match.start()) + 1
+            if body[line_start:match.start()].lstrip().startswith("%"):
+                continue
+            chunks.append(body[cursor:match.start()])
+            reference = match.group(1).strip()
+            resolved = resolve_include(path, reference)
+            if resolved is None or resolved in stack:
+                if resolved in stack:
+                    cycle = " -> ".join([*stack, resolved])
+                    warn(f"TeX include cycle detected: {cycle}.")
+                chunks.append(match.group(0))
+            else:
+                chunks.append(render(resolved))
+            cursor = match.end()
+        chunks.append(body[cursor:])
+        chunks.append(f"\n% END PAPER_LENS_FILE: {path}\n")
+        stack.pop()
+        return "".join(chunks)
+
+    roots: list[str] = []
+    if "main.tex" in tex_files:
+        roots.append("main.tex")
+    document_roots = sorted(
+        path
+        for path, body in tex_files.items()
+        if re.search(r"\\documentclass(?:\[[^\]]*\])?\s*\{", body, re.I)
+    )
+    roots.extend(path for path in document_roots if path not in roots)
+    roots.extend(path for path in sorted(tex_files) if path not in roots)
+    source_text = "".join(render(path) for path in roots if path not in expanded)
+    if not source_text:
+        warnings.append("The arXiv source archive contained no readable TeX files.")
+    return source_text, warnings
+
+
+def find_source_asset(
+    include_value: str, source_file: str, source_assets: list[dict[str, Any]]
+) -> tuple[str, str]:
+    assets_by_path = {
+        str(item.get("archive_path")): item
+        for item in source_assets
+        if item.get("archive_path") and item.get("path")
+    }
+    normalized_paths: list[str] = []
+    for base in (source_file, ""):
+        normalized = normalize_source_reference(include_value, base)
+        if normalized and normalized not in normalized_paths:
+            normalized_paths.append(normalized)
+    if not normalized_paths:
+        return "", ""
+    candidates: list[str] = []
+    for normalized in normalized_paths:
+        candidates.append(normalized)
+        if not PurePosixPath(normalized).suffix:
+            candidates.extend(
+                f"{normalized}{suffix}" for suffix in sorted(SOURCE_IMAGE_SUFFIXES)
+            )
+    for candidate in candidates:
+        item = assets_by_path.get(candidate)
+        if item:
+            return str(item["path"]), candidate
+
+    requested_name = PurePosixPath(normalized_paths[0]).name
+    requested_stem = PurePosixPath(requested_name).stem
+    basename_matches = [
+        item
+        for archive_path, item in assets_by_path.items()
+        if PurePosixPath(archive_path).name == requested_name
+        or (
+            not PurePosixPath(requested_name).suffix
+            and PurePosixPath(archive_path).stem == requested_stem
+        )
+    ]
+    if len(basename_matches) == 1:
+        item = basename_matches[0]
+        return str(item["path"]), str(item["archive_path"])
+    return "", ""
+
+
 def parse_figure_context(source_text: str, source_assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
     figures: list[dict[str, Any]] = []
-    asset_by_name = {Path(item["archive_path"]).name: item["path"] for item in source_assets}
-    pattern = re.compile(r"\\begin\{figure\*?\}(.*?)\\end\{figure\*?\}", re.S | re.I)
-    for match in pattern.finditer(source_text):
+    for match in TEX_FIGURE_BLOCK_RE.finditer(source_text):
         block = match.group(1)
         include = re.search(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", block)
         caption = re.search(r"\\caption\{(.*?)\}", block, re.S)
@@ -475,18 +632,18 @@ def parse_figure_context(source_text: str, source_assets: list[dict[str, Any]]) 
             re.finditer(r"\\(?:section|subsection|subsubsection)\*?\{([^}]+)\}", source_text[: match.start()])
         )
         include_value = include.group(1).strip() if include else ""
-        include_name = Path(include_value).name
-        asset_path = asset_by_name.get(include_name)
-        if asset_path is None and not Path(include_name).suffix:
-            for name, path in asset_by_name.items():
-                if Path(name).stem == include_name:
-                    asset_path = path
-                    break
+        marker_matches = list(TEX_FILE_MARKER_RE.finditer(source_text[: match.start()]))
+        source_file = marker_matches[-1].group("path").strip() if marker_matches else ""
+        asset_path, archive_path = find_source_asset(
+            include_value, source_file, source_assets
+        )
         figures.append(
             {
                 "origin": "arxiv_source",
                 "includegraphics": include_value,
                 "path": asset_path or "",
+                "archive_path": archive_path,
+                "source_file": source_file,
                 "caption": re.sub(r"\s+", " ", caption.group(1)).strip() if caption else "",
                 "label": label.group(1).strip() if label else "",
                 "section": section_matches[-1].group(1).strip() if section_matches else "",
@@ -497,7 +654,7 @@ def parse_figure_context(source_text: str, source_assets: list[dict[str, Any]]) 
 
 def extract_source_bundle(source_tar: Path, workspace: Path) -> tuple[list[dict[str, Any]], str, list[str]]:
     source_assets: list[dict[str, Any]] = []
-    tex_parts: list[str] = []
+    tex_files: dict[str, str] = {}
     warnings: list[str] = []
     try:
         archive = tarfile.open(source_tar, "r:*")
@@ -535,15 +692,14 @@ def extract_source_bundle(source_tar: Path, workspace: Path) -> tuple[list[dict[
             if len(data) > member.size or len(data) > MAX_ARCHIVE_MEMBER_BYTES:
                 raise PipelineError(f"Archive member {safe_name!r} expanded beyond its declared size.")
             if suffix == ".tex":
-                tex_parts.append(f"\n% BEGIN {safe_name}\n{data.decode('utf-8', errors='replace')}\n% END {safe_name}\n")
+                tex_files[safe_name] = data.decode("utf-8", errors="replace")
                 continue
             path = convert_source_asset(data, safe_name, workspace / "assets")
             if path:
                 source_assets.append({"origin": "arxiv_source", "archive_path": safe_name, "path": path})
-    source_text = "".join(tex_parts)
+    source_text, source_warnings = resolve_tex_sources(tex_files)
+    warnings.extend(source_warnings)
     write_text(workspace / "cache" / "source.tex", source_text)
-    if not tex_parts:
-        warnings.append("The arXiv source archive contained no readable TeX files.")
     return source_assets, source_text, warnings
 
 
@@ -969,6 +1125,114 @@ def validate_images(workspace: Path, report: str, errors: list[str]) -> list[str
     return paths
 
 
+def _line_number(report: str, offset: int) -> int:
+    return report.count("\n", 0, offset) + 1
+
+
+def _paragraph_context(lines: list[str], line_index: int) -> tuple[int, int, str]:
+    start = line_index
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    end = line_index + 1
+    while end < len(lines) and lines[end].strip():
+        end += 1
+    return start + 1, end, " ".join(line.strip() for line in lines[start:end]).strip()
+
+
+def _grounding_diagnostic(
+    kind: str, start_line: int, end_line: int, context: str
+) -> str:
+    anchor_examples = (
+        "Equation (1), Section 2, p. 3"
+        if kind == "formula"
+        else "Table 1, Section 3, p. 3"
+    )
+    snippet = re.sub(r"\s+", " ", context).strip()[:140]
+    suffix = f" Context: {snippet!r}." if snippet else "."
+    return (
+        f"{kind.title()} discussion at lines {start_line}-{end_line} needs a "
+        f"source-location anchor such as {anchor_examples}{suffix}"
+    )
+
+
+def validate_formula_table_grounding(
+    report: str, errors: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Check formula/table evidence locally without judging scientific correctness."""
+
+    lines = report.splitlines()
+    checks: dict[str, list[dict[str, Any]]] = {"formulas": [], "tables": []}
+    seen: set[tuple[str, int, int]] = set()
+
+    def add_check(
+        kind: str,
+        line_index: int,
+        start_line: int,
+        end_line: int,
+        context_start: int | None = None,
+        context_end: int | None = None,
+    ) -> None:
+        key = (kind, start_line, end_line)
+        if key in seen:
+            return
+        seen.add(key)
+        context_start = context_start or start_line
+        context_end = context_end or end_line
+        context = " ".join(line.strip() for line in lines[context_start - 1 : context_end]).strip()
+        not_reported = bool(NOT_REPORTED_RE.search(context))
+        anchored = bool(ANCHOR_RE.search(context))
+        entry = {
+            "line": line_index + 1,
+            "block_start": start_line,
+            "block_end": end_line,
+            "anchor_found": anchored,
+            "not_reported": not_reported,
+        }
+        checks["formulas" if kind == "formula" else "tables"].append(entry)
+        if not not_reported and not anchored:
+            errors.append(_grounding_diagnostic(kind, start_line, end_line, context))
+
+    display_math_re = re.compile(r"\$\$(.+?)\$\$", re.S)
+    display_math_lines: list[int] = []
+    for match in display_math_re.finditer(report):
+        line_index = _line_number(report, match.start()) - 1
+        start_line, end_line, _ = _paragraph_context(lines, line_index)
+        display_math_lines.append(line_index)
+        add_check(
+            "formula",
+            line_index,
+            start_line,
+            end_line,
+            max(1, start_line - 2),
+            min(len(lines), end_line + 1),
+        )
+
+    for line_index, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        kind = None
+        if FORMULA_DISCUSSION_RE.search(line):
+            kind = "formula"
+        elif TABLE_DISCUSSION_RE.search(line):
+            kind = "table"
+        if kind is None:
+            continue
+        if kind == "formula" and any(abs(line_index - display_line) <= 2 for display_line in display_math_lines):
+            continue
+        start_line, end_line, _ = _paragraph_context(lines, line_index)
+        add_check(kind, line_index, start_line, end_line)
+
+    table_row_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if line.count("|") >= 2 and line.strip().startswith("|")
+    ]
+    for line_index in table_row_indexes:
+        start_line, end_line, _ = _paragraph_context(lines, line_index)
+        add_check("table", line_index, start_line, end_line)
+    return checks
+
+
 def external_links(report: str, metadata: dict[str, Any]) -> list[str]:
     original_urls = {
         source.get("url")
@@ -1008,6 +1272,7 @@ def validate_workspace(workspace: Path | str, mode: str) -> dict[str, Any]:
         errors.append("Put equation numbers in prose; do not use \\tag{} in report formulas.")
     if "\\[" in report or "\\]" in report:
         errors.append("Use $$ ... $$ rather than \\[ ... \\] for display mathematics.")
+    grounding_checks = validate_formula_table_grounding(report, errors)
     image_paths = validate_images(workspace_path, report, errors)
 
     normalized_mode = mode.lower()
@@ -1046,6 +1311,7 @@ def validate_workspace(workspace: Path | str, mode: str) -> dict[str, Any]:
         "errors": errors,
         "warnings": warnings,
         "anchor_count": anchor_count,
+        "grounding_checks": grounding_checks,
         "image_count": len(image_paths),
         "external_links": links,
         "validated_at": utc_now(),

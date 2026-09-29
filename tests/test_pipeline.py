@@ -279,6 +279,79 @@ class LocalPipelineTests(unittest.TestCase):
 
 
 class ArxivPipelineTests(unittest.TestCase):
+    def test_multifile_source_resolution_handles_nested_extensionless_missing_and_cycles(self) -> None:
+        source_text, warnings = pipeline.resolve_tex_sources(
+            {
+                "main.tex": (
+                    "\\documentclass{article}\\input{sections/method}"
+                    "\\input{missing}"
+                ),
+                "sections/method.tex": "Method text. \\include{../shared/results}",
+                "shared/results.tex": "Results text.",
+            }
+        )
+        self.assertIn("Method text.", source_text)
+        self.assertIn("Results text.", source_text)
+        self.assertIn("Missing TeX include 'missing'", " ".join(warnings))
+
+        _, cycle_warnings = pipeline.resolve_tex_sources(
+            {"main.tex": "\\input{a}", "a.tex": "A \\input{b}", "b.tex": "B \\input{a}"}
+        )
+        self.assertTrue(any("cycle" in warning.lower() for warning in cycle_warnings))
+
+    def test_multifile_figures_match_normalized_paths_before_unique_basename(self) -> None:
+        png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        source = (
+            "\\documentclass{article}\\input{sections/figures}"
+        ).encode()
+        figures_tex = (
+            "\\begin{figure}\\includegraphics{figures/a/plot}\\caption{A}\\end{figure}"
+            "\\begin{figure}\\includegraphics{figures/b/plot}\\caption{B}\\end{figure}"
+            "\\begin{figure}\\includegraphics{plot}\\caption{Ambiguous}\\end{figure}"
+        ).encode()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive_path = root / "source.tar"
+            with tarfile.open(archive_path, "w") as archive:
+                for name, data in (
+                    ("main.tex", source),
+                    ("sections/figures.tex", figures_tex),
+                    ("figures/a/plot.png", png),
+                    ("figures/b/plot.png", png),
+                ):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(data)
+                    archive.addfile(info, io.BytesIO(data))
+            assets, source_text, warnings = pipeline.extract_source_bundle(archive_path, root / "workspace")
+            self.assertEqual(warnings, [])
+            figures = pipeline.parse_figure_context(source_text, assets)
+            self.assertEqual(len(figures), 3)
+            self.assertEqual(
+                [figure["archive_path"] for figure in figures[:2]],
+                ["figures/a/plot.png", "figures/b/plot.png"],
+            )
+            self.assertEqual(figures[2]["path"], "")
+
+    def test_source_archive_safety_and_no_figure_archive(self) -> None:
+        self.assertIsNone(pipeline.safe_archive_name("../escape.tex"))
+        self.assertIsNone(pipeline.safe_archive_name(r"..\\escape.tex"))
+        self.assertIsNone(pipeline.safe_archive_name("/absolute.tex"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive_path = root / "source.tar"
+            data = b"\\documentclass{article}\\begin{document}No figures.\\end{document}"
+            with tarfile.open(archive_path, "w") as archive:
+                info = tarfile.TarInfo("main.tex")
+                info.size = len(data)
+                archive.addfile(info, io.BytesIO(data))
+            assets, source_text, warnings = pipeline.extract_source_bundle(archive_path, root / "workspace")
+            self.assertEqual(assets, [])
+            self.assertIn("No figures.", source_text)
+            self.assertEqual(warnings, [])
+
     def test_mocked_arxiv_deep_preparation_uses_latest_version_and_source_figures(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -372,6 +445,69 @@ class ArxivPipelineTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_formula_and_table_grounding_accepts_english_and_chinese_anchors(self) -> None:
+        english_errors: list[str] = []
+        english_checks = pipeline.validate_formula_table_grounding(
+            "Equation (1) defines the loss in Section 2.\n\n"
+            "$$ L = x^2 $$\n\n"
+            "Table 1 on p. 3 reports the primary comparison.",
+            english_errors,
+        )
+        self.assertEqual(english_errors, [])
+        self.assertTrue(english_checks["formulas"][0]["anchor_found"])
+        self.assertTrue(english_checks["tables"][0]["anchor_found"])
+
+        chinese_errors: list[str] = []
+        pipeline.validate_formula_table_grounding(
+            "式 (2) 在第 2 节定义目标函数。\n\n$$ y = Wx + b $$\n\n"
+            "表 1 位于第 4 页，给出主结果。",
+            chinese_errors,
+        )
+        self.assertEqual(chinese_errors, [])
+
+    def test_formula_and_table_grounding_reports_actionable_missing_anchors(self) -> None:
+        errors: list[str] = []
+        pipeline.validate_formula_table_grounding(
+            "The equation defines the loss used by the method.\n\n"
+            "$$ L = x^2 $$\n\n"
+            "The table reports the main comparison without a source location.",
+            errors,
+        )
+        self.assertEqual(len(errors), 2, errors)
+        self.assertTrue(any("Formula discussion at lines" in error for error in errors))
+        self.assertTrue(any("Table discussion at lines" in error for error in errors))
+        self.assertTrue(all("source-location anchor" in error for error in errors))
+
+    def test_formula_table_grounding_tolerates_not_reported_and_avoids_false_positives(self) -> None:
+        explicit_errors: list[str] = []
+        checks = pipeline.validate_formula_table_grounding(
+            "The formula is not reported in the paper, and the table is 未报告。",
+            explicit_errors,
+        )
+        self.assertEqual(explicit_errors, [])
+        self.assertTrue(all(item["not_reported"] for values in checks.values() for item in values))
+
+        false_positive_errors: list[str] = []
+        checks = pipeline.validate_formula_table_grounding(
+            "The formulation is described clearly, and the database relation is stable.",
+            false_positive_errors,
+        )
+        self.assertEqual(false_positive_errors, [])
+        self.assertEqual(checks, {"formulas": [], "tables": []})
+
+    def test_malformed_display_math_remains_a_validation_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf = root / "paper.pdf"
+            make_text_pdf(pdf)
+            workspace, _ = pipeline.prepare_paper(pdf.as_posix(), "quick", root / "reports", "en")
+            report_path = workspace / "report.md"
+            report = complete_quick_report(report_path.read_text(encoding="utf-8"))
+            report_path.write_text(report + "\n$$ x + 1\n", encoding="utf-8")
+            result = pipeline.validate_workspace(workspace, "quick")
+            self.assertFalse(result["ok"])
+            self.assertTrue(any("unbalanced" in error for error in result["errors"]))
+
     def test_complete_external_evidence_requires_primary_links(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -17,6 +17,7 @@ Paper Lens processes untrusted PDFs and arXiv source archives locally. The pipel
 The project:
 
 - does not execute TeX or files from source archives;
+- only expands normalized relative `\input` and `\include` references that resolve to bounded archive members; missing and cyclic references are warnings, not execution requests;
 - does not run code contained in a paper repository;
 - does not bypass encryption, paywalls, or access controls;
 - does not provide OCR;

@@ -98,11 +98,16 @@ Only `report.md` is intended as the normal deliverable. Cached paper material ma
 
 Deep mode remains useful without web access. It marks external verification as `partial` instead of silently filling gaps.
 
+### Formula and table grounding
+
+Reports may discuss formulas and tables only when the discussion includes a source-location anchor such as an equation or table number, section, or page. The deterministic validator reports the exact line/block that is missing an anchor. Statements that explicitly say a formula or table is `not reported` / `未报告` remain valid, because absence is itself part of the evidence record.
+
 ## Privacy and security
 
 - The pipeline does not upload the PDF binary to OCR, translation, conversion, or paper-hosting services. Codex necessarily reads relevant extracted text to generate the report; that model processing follows the user's configured Codex/OpenAI data controls.
 - The project contains no analytics, tracking identifiers, remote logging, or hosted service.
 - arXiv inputs download only the public abstract page, PDF, and—during deep mode—the source archive.
+- Multi-file arXiv sources resolve safe relative `\input` and `\include` references without executing TeX; missing or cyclic references are recorded as warnings.
 - Network responses and archive expansion are size-limited; extracted media is normalized to PNG before it can be embedded.
 - Scanned and encrypted PDFs fail with an actionable message. Paper Lens does not bypass access controls or paywalls.
 

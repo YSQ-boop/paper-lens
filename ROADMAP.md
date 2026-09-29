@@ -8,6 +8,7 @@ Paper Lens develops in evidence-gated milestones. Dates are targets, not promise
 - Bounded downloads and archive/media hardening.
 - Python 3.10–3.13 and macOS CI coverage.
 - Deterministic plus optional model-evaluated quality suite.
+- Formula/table grounding diagnostics with English and Chinese regression coverage.
 - Reproducible tag archives and checksums.
 
 ## 0.3 — Quality evidence
@@ -19,7 +20,8 @@ Paper Lens develops in evidence-gated milestones. Dates are targets, not promise
 
 ## 0.4 — Broader robustness
 
-- Expand coverage for difficult born-digital PDFs and multi-file arXiv sources.
+- Expand coverage for difficult born-digital PDFs and additional multi-file arXiv edge cases.
+- Preserve normalized relative asset paths and report unresolved source references.
 - Stabilize the report contract with versioned migrations.
 - Explore opt-in local OCR integration only if it preserves the no-upload boundary.
 
