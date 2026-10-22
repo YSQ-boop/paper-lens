@@ -11,6 +11,17 @@ Paper Lens has no telemetry. This file records only dated, publicly verifiable r
 
 Source: the public `YSQ-boop/paper-lens` repository as observed on the date above. Counts are snapshots and should be updated weekly while preparing an application.
 
+## Application snapshot — 2026-10-22
+
+- GitHub stars: 101
+- Public releases: 2 (`v0.2.0` on 2026-08-24 and `v0.3.0` on 2026-09-29; 36 days apart)
+- Public release-asset downloads observed through the GitHub API: 2
+- Public external contributions or quality reports verified: 0
+- Model-evaluation baseline: pending; the repository continues to claim no online score
+- Public maintenance history: 66 days since repository creation on 2026-08-17
+
+Sources: the public [repository](https://github.com/YSQ-boop/paper-lens), [releases](https://github.com/YSQ-boop/paper-lens/releases), and GitHub repository/release API responses observed on 2026-10-22.
+
 ## Application evidence gates
 
 Apply to Codex for OSS only after all readiness checks are true:
